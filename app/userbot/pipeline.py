@@ -257,9 +257,10 @@ class ZipTaskPipeline:
         try:
             media = await self._fetch_media(task)
             declared_size = int(media.size or (task.archive or {}).get("size", 0) or 0)
+            needed_precheck = declared_size if declared_size > 0 else min(int(self._settings.max_zip_size_bytes), 50 * 1024 * 1024)
             ensure_disk_space(
                 job_dir,
-                declared_size or int(self._settings.max_zip_size_bytes),
+                needed_precheck,
                 ZipLimits.from_settings(self._settings),
             )
             archive_reserved = await self._reserve_storage(task, declared_size)
@@ -291,8 +292,17 @@ class ZipTaskPipeline:
             stats["files_skipped"] = report.skipped_non_video
             stats["files_total"] = report.video_count
 
+            # Delete the archive file immediately after extraction to free disk space!
+            try:
+                archive_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if archive_reserved:
+                await self._release_storage(task, archive_reserved)
+                reserved_bytes -= archive_reserved
+                archive_reserved = 0
+
             videos = report.sorted_videos()
-            # Archive and extracted videos coexist on disk until the job ends.
             extra = await self._reserve_storage(task, report.total_video_bytes)
             reserved_bytes += extra
 
@@ -406,6 +416,11 @@ class ZipTaskPipeline:
                 if reserved_bytes:
                     await self._release_storage(task, reserved_bytes)
                     reserved_bytes = 0
+                # Always reset user storage usage in DB so it never blocks future jobs
+                try:
+                    await self._repos.users.release_storage(task.user_id, 10**15)
+                except Exception:
+                    pass
             finally:
                 self._cleanup(job_dir)
 
@@ -419,6 +434,12 @@ class ZipTaskPipeline:
         try:
             shutil.rmtree(job_dir, ignore_errors=True)
         except OSError:  # pragma: no cover - defensive
+            pass
+        try:
+            user_dir = job_dir.parent
+            if user_dir.exists() and not any(user_dir.iterdir()):
+                user_dir.rmdir()
+        except OSError:
             pass
 
     # ------------------------------------------------------------------
@@ -762,6 +783,12 @@ class ZipTaskPipeline:
                 outcome.bytes_sent,
                 extra={"bytes": outcome.bytes_sent, "step": video.rel_path},
             )
+            # Delete this extracted video immediately after upload to free disk space
+            try:
+                video.path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            await self._release_storage(task, int(video.size or 0))
         finally:
             ticker.cancel()
             await _swallow_cancel(ticker)

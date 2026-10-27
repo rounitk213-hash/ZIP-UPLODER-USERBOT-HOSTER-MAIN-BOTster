@@ -881,6 +881,7 @@ class UserbotManager:
                 # periodically so those tasks are eventually requeued.
                 if time.monotonic() - self._last_recovery >= max(60.0, WORKER_HEARTBEAT_SECONDS * 6):
                     self._last_recovery = time.monotonic()
+                    cleanup_stale_temp_dirs(self._settings.temp_path, self._settings.cleanup_stale_temp_hours)
                     await self.recover()
                 self._metrics.gauge("manager.active_workers", float(len(self._workers)))
             except asyncio.CancelledError:

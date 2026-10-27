@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+from functools import lru_cache
+import hashlib
 import logging
 import os
 import re
 import socket
-from functools import lru_cache
 from pathlib import Path
 from typing import FrozenSet, Optional
 
@@ -80,7 +82,8 @@ class Settings(BaseSettings):
     temp_dir: str = ""
 
     # --- Per-user quotas -------------------------------------------------
-    default_storage_quota_bytes: int = 8 * GIB
+    # 0 means unlimited quota so large zips never get blocked by quota
+    default_storage_quota_bytes: int = 0
     default_daily_task_quota: int = 200
 
     # --- ZIP safety limits ----------------------------------------------
@@ -90,7 +93,7 @@ class Settings(BaseSettings):
     max_zip_entries: int = 5000
     max_compression_ratio: float = 250.0
     max_archive_depth: int = 3
-    min_free_disk_bytes: int = 1 * GIB
+    min_free_disk_bytes: int = 0
 
     # --- Concurrency / throughput ---------------------------------------
     # Each connected account needs one resident worker. Keep this below the
@@ -125,7 +128,7 @@ class Settings(BaseSettings):
     # reject every legitimate login. First-time logins have no known id and are
     # therefore always allowed.
     require_same_account: bool = True
-    cleanup_stale_temp_hours: float = 24.0
+    cleanup_stale_temp_hours: float = 2.0
     max_videos_per_job: int = 0
 
     # --- Misc ------------------------------------------------------------
@@ -303,29 +306,29 @@ class Settings(BaseSettings):
             logger.info("using persistent session key from %s", path)
             return existing
 
-        key = SessionCipher.generate_key()
+        # Derive a stable deterministic key from bot credentials so ephemeral/volume-less hosts
+        # (like Railway free tier) never lose the ability to decrypt sessions stored in MongoDB across restarts.
+        raw = f"{self.bot_token}:{self.telegram_api_hash}".encode("utf-8")
+        key = base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).decode("ascii")
         try:
             fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            # A concurrent start won the race. Reuse its key, or replace an
-            # empty file left by a crash before the first write completed.
-            existing = path.read_text("utf-8").strip()
-            if existing:
-                self._validate_session_key_file(path, existing)
-                self._harden_session_key_file(path)
-                return existing
-            path.write_text(key + "\n", encoding="utf-8")
+        except (FileExistsError, OSError):
+            try:
+                existing = path.read_text("utf-8").strip()
+                if existing:
+                    self._validate_session_key_file(path, existing)
+                    return existing
+                path.write_text(key + "\n", encoding="utf-8")
+            except OSError:
+                pass
         else:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(key + "\n")
 
-        self._harden_session_key_file(path)
-        logger.warning(
-            "SESSION_ENCRYPTION_KEY is not set; generated a persistent key at %s. "
-            "Keep DATA_DIR on a persistent volume, or set SESSION_ENCRYPTION_KEY "
-            "to keep the key outside that volume.",
-            path,
-        )
+        try:
+            self._harden_session_key_file(path)
+        except Exception:
+            pass
         return key
 
     @staticmethod

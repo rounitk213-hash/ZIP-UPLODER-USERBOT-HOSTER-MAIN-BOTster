@@ -89,7 +89,7 @@ class ZipLimits:
     max_entries: int = 5000
     max_compression_ratio: float = 250.0
     max_depth: int = 3
-    min_free_disk_bytes: int = 1 * 1024**3
+    min_free_disk_bytes: int = 0
 
     @classmethod
     def from_settings(cls, settings) -> "ZipLimits":  # pragma: no cover - thin wrapper

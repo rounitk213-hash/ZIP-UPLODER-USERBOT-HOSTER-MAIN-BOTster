@@ -870,6 +870,10 @@ class TaskStepRepository:
         cursor = self._col.find({"task_id": ObjectId(task_id)}).sort("rel_path", 1)
         return [StepRecord.from_doc(doc) async for doc in cursor]
 
+    async def delete_for_task(self, task_id: str) -> int:
+        result = await self._col.delete_many({"task_id": ObjectId(task_id)})
+        return int(getattr(result, "deleted_count", 0) or 0)
+
     async def list_by_status(self, task_id: str, statuses: Sequence[str]) -> List[StepRecord]:
         cursor = self._col.find(
             {"task_id": ObjectId(task_id), "status": {"$in": list(statuses)}}
